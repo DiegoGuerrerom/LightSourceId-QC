@@ -1,0 +1,325 @@
+import numpy as np
+import matplotlib.pyplot as plt 
+import scipy.io as sio 
+import bitarray as bta 
+import bitarray.util as butil 
+import transforms as tr 
+import time 
+
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+from sklearn.preprocessing import normalize
+import time 
+
+#Quantum computing 
+from qiskit import QuantumCircuit 
+from qiskit import QuantumRegister 
+from qiskit import ClassicalRegister 
+from qiskit.circuit.library import CZGate 
+from qiskit.visualization import plot_histogram
+from qiskit import transpile, assemble
+from qiskit_aer import Aer 
+
+from HouseHolder import getUnitaryHH 
+from plotAll import quantumRealProd, quantumProd
+
+
+
+def scale(num, resolution, max_value):
+    return np.floor(resolution * num / max_value)
+
+def getBars(meanPhotonNumber, datapoints, path):
+    name = 'H'+str(meanPhotonNumber)+'_M_'+str(datapoints)+'.mat'
+    return sio.loadmat(path+name)
+
+def bars2bit(database, numBits):
+    rows, cols = np.shape(database)
+
+    newDataBase = np.zeros((rows*numBits,cols), dtype = np.int8) #Storage of new binvect
+    #print(np.shape(newDataBase))
+    resolution = 2**numBits
+
+    newRow = np.zeros(numBits, dtype = np.int8) 
+    maxVal = 1
+
+    init = time.time()
+    for i in range(cols):
+        #Initial binary string
+        newRow = bta.bitarray('') 
+
+        for j in range(rows):
+            
+            num = np.int64(scale(database[j][i], resolution, maxVal)) # Scale the number 
+            binaryNum = np.binary_repr(num, numBits) # Convert it into a binary string
+            
+            newRow.extend(binaryNum) # Append the entire string into de bitarray newRow
+        
+        
+        binaryVec = np.array(newRow.tolist(), dtype = np.int8) # convert the bitarray into a np array of numBits*numBars lenght
+
+        newDataBase[:,i] = binaryVec # assign the new vector to the column of the database
+    final = time.time()
+
+    print(final - init)
+    return newDataBase
+
+def bin2ones(database):
+    rows, cols = np.shape(database)
+    onesDatabase = -np.ones((rows, cols), dtype = np.int8) 
+    return onesDatabase**database
+    
+                
+
+def getData(meanPhotonNumber, datapoints, numBits):
+
+    path = '/home/guerrero/Documents/UNAM/PerceprontV1/database/'
+    data = getBars(meanPhotonNumber, datapoints, path)
+    cohData = data['Coh']
+    thData = data['Th']
+    #print(np.shape(cohData))
+
+    enCohData = bars2bit(cohData, numBits)
+    enThData = bars2bit(thData, numBits)
+
+    return enCohData, enThData
+
+def overlap(coherent, thermal):
+    np.shape(coherent)
+    np.shape(thermal)
+    return np.sum(np.sqrt(coherent) * np.sqrt(thermal))**2 / ((np.sum(coherent))*(np.sum(thermal)))
+
+
+def normalizeRange(cohHist, thHist):
+    leftTh = thHist[1][0]
+    rightTh = thHist[1][len(thHist[1]) - 1]
+    leftCoh = cohHist[1][0]
+    rightCoh = cohHist[1][len(cohHist[1]) - 1]
+    print(rightCoh - rightTh)
+    fillerTh = np.zeros(int(np.sqrt(rightCoh**2 - rightTh**2)))
+    fillerCoh = np.zeros(int(np.sqrt(leftTh**2 - leftCoh**2)))
+
+    newCoh = np.concatenate((fillerCoh,cohHist[0]))
+    newTh = np.concatenate((thHist, fillerTh[0]))
+    return newCoh, newTh
+
+
+def getTresholdInLoop(cohHist, thHist):
+
+    mix = np.concatenate((cohHist[1], thHist[1]))
+    min = np.min(mix)
+    max = np.max(mix)
+    mixArange = np.arange(min, max)
+    treshold = np.median(mixArange)
+    return treshold
+
+
+def getAllFitness(mfs, coh, th, qc, treshold, nshots):
+    
+    w = np.array(mfs, dtype = np.int8)
+    rows, cols = np.shape(coh)
+    rowsT, colsT = np.shape(th)
+    
+    # Classical projections 
+    projCoh = np.zeros(cols)
+    projTh = np.zeros(cols)
+
+    #Qiskit simulated projections 
+    projCohSim = np.zeros(cols)
+    projThSim = np.zeros(cols)
+    
+    #Executed in IBMQ processors
+    projCohQuant = np.zeros(cols)
+    projThQuant = np.zeros(cols)
+    
+    for i in range(cols):
+
+        # Coherent projections
+        psi_i = np.array(coh[:,i], dtype = np.int8)
+        print('i:', psi_i)
+        print(np.dot(mfs, psi_i))
+        print(mfs)
+        projCoh[i] = np.dot(mfs,psi_i)
+        projCohSim[i]= len(psi_i)*quantumProd(qc, mfs, psi_i, nshots)
+        #projCohQuant[i] = len(psi_i)*quantumRealProd(qc, mfs, psi_i)
+        
+        # Thermal projections 
+        psi_i = th[:,i]
+        projTh[i] = np.dot(mfs, psi_i)
+        projThSim[i]= len(psi_i)*quantumProd(qc, mfs, psi_i, nshots)
+        #projThQuant[i] = len(psi_i)*quantumRealProd(qc, mfs, psi_i)     
+    print('Cls:\n',projCoh)
+    print('Sim:\n',projCohSim)
+    projDiffSim_Class = np.abs(projCohSim - projCoh)
+    projDiffReal_Class = np.abs(projCohQuant - projCoh)
+    projDiffReal_Sim = np.abs(projCohQuant - projCohSim)
+
+    plt.plot(np.arange(len(projCoh)), projDiffSim_Class)
+    #plt.plot(np.arange(len(projCoh)), projDiffReal_Class)
+    #plt.plot(np.arange(len(projCoh)), projDiffSim_Class)
+    plt.savefig('differences.png')
+    plt.close()
+    n_bins = 10
+    
+    # Histogram and treshold
+    cohHist = np.histogram(projCoh, n_bins)
+    thHist = np.histogram(projTh, n_bins)
+    #Fitness calculation 
+    #olap = overlap(thHist[0], thHist[0]) #Overlap
+    olap = overlap(cohHist[0], thHist[0]) #Overlap
+
+    #treshold = getTresholdInLoop(cohHist, thHist) #accuracy
+    
+    # Get accuracy of each method (class, sim, real)
+
+    mixClass = np.concatenate((projCoh, projTh))
+    mixQsim = np.concatenate((projCohSim, projThSim))
+    mixQreal = np.concatenate((projCohQuant, projThQuant))
+
+    classification = np.zeros(len(mixClass))
+    classification[:len(projCoh)] = 1
+    
+    predictionsClss= np.where(mixClass >= treshold, 1, 0)
+    predictionsQsim = np.where(mixQsim >= treshold, 1, 0)
+    predictionsQreal = np.where(mixQreal >= treshold, 1, 0)
+    print('Classic:',predictionsClss)
+    print('Simulated:',predictionsQsim)
+    accuracy = (accuracy_score(classification, predictionsClss),
+                accuracy_score(classification, predictionsQsim),
+                accuracy_score(classification, predictionsQreal))
+
+
+
+    return accuracy
+
+
+def getFitness(mfs, coh, th, qc, treshold, nshots):
+    
+    rows, cols = np.shape(coh)
+    rowsT, colsT = np.shape(th)
+    
+    # Classical projections 
+    projCoh = np.zeros(cols)
+    projTh = np.zeros(cols)
+
+    #Qiskit simulated projections 
+    projCohSim = np.zeros(cols)
+    projThSim = np.zeros(cols)
+    
+    #Ejecuted in IBMQ processors
+    projCohQuant = np.zeros(cols)
+    projThQuant = np.zeros(cols)
+
+    for i in range(cols):
+      psi_i = coh[:,i]
+      projCohQuant[i] = len(psi_i)*quantumRealProd(qc, mfs, psi_i)
+      #projCoh[i] = mfs@psi_i
+
+      psi_i = th[:,i]
+      projThQuant[i] = len(psi_i)*quantumRealProd(qc, mfs, psi_i)
+      #projTh[i] = mfs@psi_i
+
+    n_bins = 10
+
+    cohHist = np.histogram(projCoh, n_bins)
+    thHist = np.histogram(projTh, n_bins)
+    #Fitness calculation 
+    #olap = overlap(thHist[0], thHist[0]) #Overlap
+    olap = overlap(cohHist[0], thHist[0]) #Overlap
+
+    #treshold = getTresholdInLoop(cohHist, thHist) #accuracy
+    
+    mix = np.concatenate((projCoh, projTh))
+    
+    classification = np.zeros(len(mix))
+    classification[:len(projCoh)] = 1
+    
+    predictions = np.where(mix >= treshold, 1, 0)
+
+    accuracy = accuracy_score(classification, predictions)
+
+
+
+    return olap, accuracy
+
+
+
+
+
+def getTreshold(mfs, coh, th, qc, nshots):
+
+    rows, cols = np.shape(coh)
+    weight = mfs
+    print(rows, cols)
+    projCoh = np.zeros(cols)
+    projTh = np.zeros(cols)
+    
+    
+    for i in range(cols):
+        psi_i = coh[:,i]
+        print(np.shape(weight))
+        print(np.shape(psi_i))
+        projCoh[i] = len(psi_i)*quantumProd(qc, mfs, psi_i, nshots)
+        #projCoh[i] = weight@psi_i
+
+        psi_i = th[:,i]
+        projTh[i] = len(psi_i)*quantumProd(qc, mfs, psi_i, nshots)
+        #projTh[i] = weight@psi_i
+
+    n_bins = 10
+    cohHist = np.histogram(projCoh, n_bins)
+    thHist = np.histogram(projTh, n_bins)
+
+    mix = np.concatenate((cohHist[1], thHist[1]))
+    min = np.min(mix)
+    max = np.max(mix)
+    mixArange = np.arange(min, max)
+    treshold = np.median(mixArange)
+    print(treshold)
+
+    plt.hist(projCoh, n_bins, alpha = 0.75)
+    plt.hist(projTh, n_bins, alpha = 0.75)
+    plt.axvline(x = treshold, color = 'g', label = 'treshold')
+    plt.legend()
+    plt.title(str(mfs)+'Accuracy: '+str(overlap)  + ' treshold: ' + str(treshold))
+    plt.savefig('_Accuracy_'+str(overlap)  + ' treshold: ' + str(treshold) + '.png', bbox_inches = 'tight')
+    plt.close()
+
+    
+    #predCoh = np.where(projCoh >= treshold, 1, 0)
+    #predTh = np.where(projTh < treshold, 1, 0)
+    
+    #numOfTh = np.sum(predCoh)
+    #numOfCoh = np.sum(predTh)
+    
+    #efficiency =  ((len(th) - numOfTh) + (len(coh) - numOfCoh)) / (len(th) + len(coh))
+     
+    return treshold
+
+
+def multipointCO(childrenMat):
+
+    l, col = np.shape(childrenMat)
+    #print(l,col)
+    probArr = np.ones(l)/ l
+    #print(probArr)
+    ran = np.arange(0, col, 2)
+
+    for i in ran:
+        chosen = np.random.choice(np.arange(l).tolist(), 1, probArr.tolist())  
+        tmp1 = childrenMat[chosen, i]
+        tmp2 = childrenMat[chosen, i + 1]
+
+        childrenMat[chosen, i] = tmp2
+        childrenMat[chosen, i + 1] = tmp1
+
+    return childrenMat
+
+def randomMutation(population, mutVect):
+    #Mut vect are the selected columns 
+    cols = np.nonzero(mutVect)
+    randomId = np.random.randint(0, len(population), len(cols)) # randomId are the selected entries, one per selected chromosome
+    population[randomId, cols] = -1*population[randomId, cols] #switch selected mutants 
+
+    return population
+
