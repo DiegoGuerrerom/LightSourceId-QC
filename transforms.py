@@ -2,7 +2,7 @@ from qiskit import QuantumCircuit
 from qiskit import QuantumRegister
 from qiskit import ClassicalRegister
 from qiskit.quantum_info import Statevector
-from qiskit_ibm_runtime import SamplerV2 
+from qiskit_ibm_runtime import SamplerV2, Batch
 from qiskit_aer import Aer, AerSimulator
 from qiskit import QuantumCircuit, transpile, assemble
 import qiskit_ibm_runtime.fake_provider as fak
@@ -17,6 +17,8 @@ from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit.visualization import plot_histogram
 from qiskit_ibm_runtime import QiskitRuntimeService, Session
 import transforms as tr
+import concurrent.futures
+from typing import List
 # Ui
 def u1(qc):
     qc.cz(0,1)
@@ -268,7 +270,7 @@ def simulateAerBackend(qc, n_shots):
     # get a real backend from the runtime service
 
     service = QiskitRuntimeService()    
-    backend = service.least_busy(operational = True, simulator = False, min_num_qubits = qc[0].num_qubits)
+    backend = service.least_busy(operational = True, simulator = False, min_num_qubits = qc.num_qubits)
     backend = service.backend("ibm_brisbane")
  
     # generate a simulator that mimics the real quantum system with the latest calibration results
@@ -389,8 +391,6 @@ def realExecute(qc):
     #2) Define Backend 
     backend = service.least_busy(operational = True, simulator = False, min_num_qubits = numQubits)
     
-    #backends = service.backends()
-    #backend = backends[0]
     #Pre steps to transpilation
 
     # 3) Create the pass manager 
@@ -445,7 +445,7 @@ def realExecuteSession(qc):
     passedCirquit = pm.run(qc)
     #print('Passed circuit')
     #print(passedCirquit)
-    with Session(service = service, backend=backend) as session:
+    with Session(service = service, backend=backend, max_time="25m") as session:
         # Submit a session  
         sampler = SamplerV2(session = session)
         job = sampler.run([passedCirquit])
@@ -464,6 +464,91 @@ def realExecuteSession(qc):
         print(counts)
         
         return counts['1']/nshots
-        
-        
 
+def realExecuteSessionMulti(qc, nshots):
+
+    #print(qc)
+    numQubits = qc[0].num_qubits
+    # We got a define a runtime service 
+    #print('Saved accounts=', QiskitRuntimeService.saved_accounts())
+    service = QiskitRuntimeService()
+    #By the time, this qp is not accepting jobs 
+    backend = service.least_busy(operational = True, simulator = False, min_num_qubits = numQubits)
+
+
+    #Pre steps to transpilation
+    pm = generate_preset_pass_manager(target = backend.target, optimization_level=1)
+    passedCirquit = pm.run(qc)
+    #print('Passed circuit')
+    #print(passedCirquit)
+    with Session(service = service, backend=backend) as session:
+
+        # Submit a session  
+        sampler = SamplerV2(session = session)
+        sampler.options.max_execution_time = 12500
+        job = sampler.run(passedCirquit, shots = nshots)
+        print(f"-> Job ID:{job.job_id()}")
+        print(f"-> Job Satus: {job.status()}")
+
+        print('Estimated time (quantum seconds):', job.usage_estimation)
+        result= job.result()
+        return result 
+       
+       
+       
+def realExecuteBatch(circuits, nshots):
+    n_qubits = circuits[0].num_qubits
+    service = QiskitRuntimeService()
+    backend = service.least_busy(operational = True, simulator = False, min_num_qubits = n_qubits)
+
+    pm = generate_preset_pass_manager(backend = backend, optimization_level = 1)
+    isa_circuits = pm.run(circuits)
+
+
+    max_circuits = 250 
+    all_partitioned_circuits = []
+    for i in range(0, len(isa_circuits), max_circuits):
+        all_partitioned_circuits.append(isa_circuits[i : i + max_circuits])
+    jobs = []
+    jobs_pub_results = []
+    counts = []
+    start_idx = 0
+
+    with Batch(backend=backend, max_time = "25m"):
+        sampler = SamplerV2()
+        sampler.options.max_execution_time = 12500
+        for partitioned_circuit in all_partitioned_circuits:
+            job = sampler.run(partitioned_circuit, shots = nshots)
+            jobs.append(job)
+            job_pub = job.result()[0]
+            jobs_pub_results.append(job_pub)
+    return jobs_pub_results 
+
+
+def getResultsBatch(jobs_pub_results):
+    countsArr = []
+    for pub in jobs_pub_results:
+        counts = pub.data.meas.get_counts()
+        counts.setdefault('0', 0)
+        counts.setdefault('1', 0)
+        countsArr.append(counts['1']/nshots)
+
+    return countsArr
+
+def simulate_single_circuit(qc,n_shots):
+    return simulateAerBackend(qc, n_shots)
+
+def simulateAerBackendParallel(circuits: List[QuantumCircuit], n_shots : int):
+    results = []
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Map the function simulate_single circuit to each circuit in the list 
+        futures = {executor.submit(simulate_single_circuit, qc, n_shots): qc for qc in circuits}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                print(f"An error occured: {e}")
+    return results 
+
+    
